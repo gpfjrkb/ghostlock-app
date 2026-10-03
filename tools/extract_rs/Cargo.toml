@@ -41,3 +41,15 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# CI-only profile for `cargo test` (see .github/workflows/build.yml, "Test
+# extractor"). Cargo forces `panic = "unwind"` on test targets, so a test build
+# sharing the `release` profile rewrites build/extract/release/ghostlock-extract
+# with a different panic strategy, and the following `cargo build --release`
+# then has to redo the whole fat-LTO link (~20 s per run). A separate profile
+# keeps the two builds in different target subdirectories; dropping LTO makes
+# the test build itself several times cheaper.
+[profile.ci-test]
+inherits = "release"
+lto = false
+codegen-units = 16

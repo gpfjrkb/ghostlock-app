@@ -45,17 +45,29 @@ jobs:
             ~/.cargo/git
             build/extract
             build/extract-cli
-          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
-          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
-          # including the `-Z build-std` std/panic_abort artifacts.
+          # The key has to cover the crate's own sources, not just Cargo.lock:
+          # actions/cache only writes an entry whose key does not exist yet, so a
+          # lock-only key freezes the target dir at the first save and every
+          # later source change gets restored-then-rebuilt without ever being
+          # persisted. Cargo.lock stays the restore-key prefix so a source
+          # change still reuses every dependency artifact.
+          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-${{ hashFiles('tools/extract_rs/src/**', 'tools/extract_rs/Cargo.toml', 'tools/extract_rs/.cargo/**') }}
           restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-
             cargo-${{ runner.os }}-
 
       - name: Test extractor
         working-directory: tools/extract_rs
         run: |
-          cargo test --release --features http
+          # `cargo test` forces `panic = "unwind"` on test targets while the
+          # release profile asks for `panic = "abort"`, so both builds want the
+          # same output path with different codegen: whichever runs second
+          # invalidates the first and the fat-LTO link is paid twice per run.
+          # `ci-test` (see tools/extract_rs/Cargo.toml) is a release clone with
+          # LTO off and its own target subdirectory, so the shipped release
+          # binary is linked once and the test build itself is cheap.
           cargo build --release --features http
+          cargo test --profile ci-test --features http
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -105,7 +117,11 @@ jobs:
           export KEYSTORE_PASS="${{ secrets.KEY_STORE_PASSWORD }}"
           export KEY_ALIAS="${{ secrets.ALIAS }}"
           export KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
-          ./gradlew :app:assembleRelease --no-daemon
+          # `exportKernelProfiles` used to be a second `./gradlew` call of its
+          # own, which paid a whole daemon start and a configuration-cache miss
+          # (~15 s) to run one JavaExec task. Asking for it here is free: the
+          # configuration and dependency graph are already built.
+          ./gradlew :app:assembleRelease :profile-core:exportKernelProfiles --no-daemon
 
       - name: Strip Ghostlock binary
         run: |
@@ -132,9 +148,6 @@ jobs:
           cargo +ondk build --release --target aarch64-linux-android --features http --manifest-path tools/extract_rs/Cargo.toml --target-dir build/extract-cli \
             -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size
           cp build/extract-cli/aarch64-linux-android/release/ghostlock-extract tools/extract_rs/ghostlock-extract-android-arm64
-
-      - name: Export kernel profiles (GLK1)
-        run: ./gradlew exportKernelProfiles --no-daemon
 
       - name: Package kernel profiles
         run: |
@@ -196,10 +209,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/extract
-          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
-          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
-          # including the `-Z build-std` std/panic_abort artifacts.
+          # See the build-apk job: a lock-only key never gets re-saved, so the
+          # target dir would stay frozen at its first snapshot.
+          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-${{ hashFiles('tools/extract_rs/src/**', 'tools/extract_rs/Cargo.toml', 'tools/extract_rs/.cargo/**') }}
           restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-
             cargo-${{ runner.os }}-
 
       - name: Build macOS universal binary
@@ -236,10 +250,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/extract
-          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
-          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
-          # including the `-Z build-std` std/panic_abort artifacts.
+          # See the build-apk job: a lock-only key never gets re-saved, so the
+          # target dir would stay frozen at its first snapshot.
+          key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-${{ hashFiles('tools/extract_rs/src/**', 'tools/extract_rs/Cargo.toml', 'tools/extract_rs/.cargo/**') }}
           restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-
             cargo-${{ runner.os }}-
 
       - name: Build Windows binary
