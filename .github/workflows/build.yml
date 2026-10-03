@@ -44,6 +44,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/extract
+            # build/extract-cli is built by the build-extractor-cli job since the
+            # split. It stays listed here purely to keep the cache version —
+            # which actions/cache derives from the path list, not the key —
+            # unchanged, so the existing ~650 MB entry stays usable.
             build/extract-cli
           # The key has to cover the crate's own sources, not just Cargo.lock:
           # actions/cache only writes an entry whose key does not exist yet, so a
@@ -60,13 +64,11 @@ jobs:
         working-directory: tools/extract_rs
         run: |
           # `cargo test` forces `panic = "unwind"` on test targets while the
-          # release profile asks for `panic = "abort"`, so both builds want the
-          # same output path with different codegen: whichever runs second
-          # invalidates the first and the fat-LTO link is paid twice per run.
-          # `ci-test` (see tools/extract_rs/Cargo.toml) is a release clone with
-          # LTO off and its own target subdirectory, so the shipped release
-          # binary is linked once and the test build itself is cheap.
-          cargo build --release --features http
+          # release profile asks for `panic = "abort"`, so a test build sharing
+          # the release profile would invalidate the fat-LTO link of the
+          # release binary. `ci-test` (see tools/extract_rs/Cargo.toml) is a
+          # release clone with LTO off in its own target subdirectory.
+          # The release binaries themselves are built by build-extractor-cli.
           cargo test --profile ci-test --features http
 
       - name: Set up Gradle
@@ -130,25 +132,6 @@ jobs:
       - name: Rename Release APK
         run: mv build/app/outputs/apk/release/*.apk GhostLock-release.apk
 
-      - name: Prepare extractor binaries
-        run: |
-          cp build/extract/release/ghostlock-extract tools/extract_rs/ghostlock-extract-linux-x86_64
-
-          export CC_aarch64_linux_android="${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
-          export AR_aarch64_linux_android="${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-          export RUSTC_BOOTSTRAP=1
-          export RUSTFLAGS="-C force-unwind-tables=no -C link-arg=-Wl,--icf=all"
-          # `--features http` is CLI-only: the APK's libextract.so is built
-          # without it on purpose (Kotlin resolves remote URLs), and
-          # `:app:prepareGhostlockExtractJniLibs` has already built that variant
-          # into build/extract. Sharing one target dir would make the two
-          # feature sets invalidate each other and rebuild the crate (plus the
-          # `-Z build-std` std artifacts) twice per run.
-          cargo +ondk build --release --target aarch64-linux-android --features http --manifest-path tools/extract_rs/Cargo.toml --target-dir build/extract-cli \
-            -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size
-          cp build/extract-cli/aarch64-linux-android/release/ghostlock-extract tools/extract_rs/ghostlock-extract-android-arm64
-
       - name: Package kernel profiles
         run: |
           cd build/kernel-profiles
@@ -175,6 +158,77 @@ jobs:
           name: ghostlock
           path: build/native/ghostlock
           archive: false
+
+  # The extractor CLIs need neither the JDK, the Android app nor Gradle, and the
+  # two cross-compiles were two of the slowest steps of the APK job. Running
+  # them on a runner of their own takes them off that job's critical path; the
+  # only thing that has to stay in sync is the artifact names below, which
+  # Pre-release and post_telegram download by name.
+  build-extractor-cli:
+    name: Build Extractor (CLI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same paths as build-apk but a distinct key prefix, so neither job can
+      # clobber the other's target directory.
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/extract
+            build/extract-cli
+          key: cargo-cli-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-${{ hashFiles('tools/extract_rs/src/**', 'tools/extract_rs/Cargo.toml', 'tools/extract_rs/.cargo/**') }}
+          restore-keys: |
+            cargo-cli-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}-
+            cargo-cli-${{ runner.os }}-
+
+      - name: Cache ONDK
+        id: ondk-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/ondk
+          key: ondk-${{ env.ONDK_VERSION }}-linux
+          restore-keys: |
+            ondk-${{ env.ONDK_VERSION }}-
+
+      - name: Download ONDK
+        if: steps.ondk-cache.outputs.cache-hit != 'true'
+        run: |
+          url="https://github.com/topjohnwu/ondk/releases/download/${ONDK_VERSION}/ondk-${ONDK_VERSION}-linux.tar.xz"
+          mkdir -p "${{ runner.temp }}/ondk"
+          curl -fL --retry 3 --retry-delay 2 "$url" -o "${{ runner.temp }}/ondk.tar.xz"
+          tar -C "${{ runner.temp }}/ondk" --strip-components=1 -xf "${{ runner.temp }}/ondk.tar.xz"
+
+      - name: Link ONDK Rust toolchain
+        run: rustup toolchain link ondk "${{ runner.temp }}/ondk/toolchains/rust"
+
+      - name: Build extractor binaries
+        working-directory: tools/extract_rs
+        run: |
+          cargo build --release --features http
+          cp ../../build/extract/release/ghostlock-extract ghostlock-extract-linux-x86_64
+
+          export CC_aarch64_linux_android="${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+          export AR_aarch64_linux_android="${{ runner.temp }}/ondk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          export RUSTC_BOOTSTRAP=1
+          export RUSTFLAGS="-C force-unwind-tables=no -C link-arg=-Wl,--icf=all"
+          # `--features http` is CLI-only: the APK's libextract.so is built
+          # without it on purpose (Kotlin resolves remote URLs), and
+          # `:app:prepareGhostlockExtractJniLibs` builds that variant into
+          # build/extract inside the APK job. Sharing one target dir would make
+          # the two feature sets invalidate each other and rebuild the crate
+          # (plus the `-Z build-std` std artifacts) twice over.
+          cargo +ondk build --release --target aarch64-linux-android --features http --target-dir ../../build/extract-cli \
+            -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size
+          cp ../../build/extract-cli/aarch64-linux-android/release/ghostlock-extract ghostlock-extract-android-arm64
 
       - name: Upload Extractor Linux
         uses: actions/upload-artifact@v7
@@ -274,7 +328,7 @@ jobs:
 
   prerelease:
     name: Pre-release
-    needs: [build-apk, build-extractor-macos, build-extractor-windows]
+    needs: [build-apk, build-extractor-cli, build-extractor-macos, build-extractor-windows]
     runs-on: ubuntu-latest
     if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag' }}
     permissions:
@@ -382,7 +436,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   post_telegram:
-    needs: [build-apk, build-extractor-macos, build-extractor-windows]
+    needs: [build-apk, build-extractor-cli, build-extractor-macos, build-extractor-windows]
     runs-on: ubuntu-latest
     if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag' }}
     steps:
