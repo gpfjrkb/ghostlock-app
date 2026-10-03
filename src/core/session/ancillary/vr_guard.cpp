@@ -89,8 +89,15 @@ namespace ghostlock::session::ancillary {
          * target five times over. Fail closed instead: the probe stays armed
          * and the caller reports an ordinary behavior failure. */
         const uintptr_t target = session.addresses.data_alias(image);
-        if (target < kernel::DIRECT_MAP_BASE || target >= kernel::DIRECT_MAP_END) {
-            pr_warning("vr guard: no direct-map alias for image=%016zx "
+        /* Zero is nobody's direct-map alias, and the payload publishes a pointer
+         * slot, so a misaligned target would straddle two fields. Both mean the
+         * compiled image/page bases and the profile's phys offsets disagree.
+         * Fail here rather than at the write: the retry loop below would
+         * otherwise spend five heap sprays — the panic-prone part of the
+         * primitive — on a target that cannot succeed. */
+        if (target < kernel::DIRECT_MAP_BASE || target >= kernel::DIRECT_MAP_END ||
+            (target & 7u) != 0) {
+            pr_warning("vr guard: no usable direct-map alias for image=%016zx "
                        "(target=%016zx); this profile's phys offsets do not "
                        "match the kernel, vr.ko probe left armed\n",
                        static_cast<size_t>(image), static_cast<size_t>(target));
