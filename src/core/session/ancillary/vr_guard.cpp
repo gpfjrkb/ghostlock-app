@@ -81,7 +81,21 @@ namespace ghostlock::session::ancillary {
 
         const uintptr_t image = static_cast<uintptr_t>(
                 kernel::KIMAGE_TEXT_BASE + plan->image_offset);
+        /* `data_alias` answers 0 for every image address it cannot translate,
+         * which is what happens when the compiled image/page bases and the
+         * profile's kernel_phys_load / kernel_phys_offset disagree (see
+         * ResolvedAddresses::data_alias_checked). Zero is nobody's direct-map
+         * alias, so the zero-word primitive would end up aimed at a wild
+         * target five times over. Fail closed instead: the probe stays armed
+         * and the caller reports an ordinary behavior failure. */
         const uintptr_t target = session.addresses.data_alias(image);
+        if (target < kernel::DIRECT_MAP_BASE || target >= kernel::DIRECT_MAP_END) {
+            pr_warning("vr guard: no direct-map alias for image=%016zx "
+                       "(target=%016zx); this profile's phys offsets do not "
+                       "match the kernel, vr.ko probe left armed\n",
+                       static_cast<size_t>(image), static_cast<size_t>(target));
+            return false;
+        }
         pr_info("vr guard: neutralizing __tracepoint_sys_exit.funcs "
                 "image=%016zx target=%016zx width=%u\n",
                 static_cast<size_t>(image), static_cast<size_t>(target),
