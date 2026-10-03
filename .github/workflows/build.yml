@@ -59,6 +59,11 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          # Default is read-only outside the repository default branch, so a
+          # feature branch logs "Cache is read-only: will not save state" and
+          # re-runs the whole Kotlin/Compose build every time.
+          cache-read-only: false
 
       - name: Cache ONDK
         id: ondk-cache
