@@ -421,10 +421,24 @@ pub fn render_conf(input: &ConfInputs<'_>) -> String {
     push_conf_block(&mut lines, "cred", &cred);
 
     let offset_entries = conf_offsets(input.symbols, input.extra_offsets);
-    let offset: Vec<(String, String)> = CONF_OFFSET_FIELDS
+    let mut offset: Vec<(String, String)> = CONF_OFFSET_FIELDS
         .iter()
         .map(|key| ((*key).to_string(), conf_lookup(&offset_entries, key)))
         .collect();
+    /* Ancillary vr.ko guard symbol. It is deliberately not part of
+     * CONF_OFFSET_FIELDS: that universe is emitted with a `null` for every key,
+     * so adding it there would put a line into the profile of every other
+     * device and break the bundled-profile parity. Emitting it only when the
+     * image exposed `__tracepoint_sys_exit` keeps those profiles byte-identical
+     * and mirrors the `vr_guard` block below — without the key `plan_vr_guard`
+     * has no symbol and the global kill-switch stays off (fail closed). */
+    if let Some(value) = offset_entries
+        .iter()
+        .find(|(key, _)| key == "vr_sys_exit_tp")
+        .map(|(_, value)| value.clone())
+    {
+        offset.push(("vr_sys_exit_tp".to_string(), value));
+    }
     push_conf_block(&mut lines, "offset", &offset);
 
     // Ancillary vr.ko guard. The gate mirrors recommend_shizuku: it says the
@@ -547,6 +561,47 @@ mod tests {
             let out = render(bad);
             assert!(!out.contains("vr_guard"));
             assert!(!out.contains("recommend_vr_guard"));
+        }
+    }
+
+    #[test]
+    fn conf_carries_the_vr_guard_symbol_only_when_the_image_exposed_it() {
+        let (mut symbols, structs) = conf_fixture();
+        let geometry: Vec<(&'static str, i64)> = vec![("waiter_shift", -2)];
+        let render = |symbols: &BTreeMap<String, Option<u64>>| {
+            render_conf(&ConfInputs {
+                release: "6.1.145-android14-11-maybe-dirty",
+                phys: None,
+                phys_offset: None,
+                symbols,
+                structs: &structs,
+                route: Some("select_stack"),
+                route_geometry: &geometry,
+                cred: &conf_cred_6x(),
+                extra_offsets: &no_extra_offsets(),
+            })
+        };
+
+        /* The symbol is what `plan_vr_guard` turns into the write target: a
+         * profile that has the layout but not the symbol leaves the global
+         * `__tracepoint_sys_exit` kill-switch off, so the key has to survive
+         * the render. */
+        symbols.insert("off_vr_sys_exit_tp".to_string(), Some(36_315_680));
+        let present = render(&symbols);
+        assert!(present.contains("offset {\n"));
+        assert!(
+            present.contains("  vr_sys_exit_tp = 36315680\n"),
+            "resolved symbol missing from the offset block:\n{present}"
+        );
+
+        /* Unresolved (`None`) or never-resolved devices keep profiles that stay
+         * byte-identical to the bundled ones, which carry no such key. */
+        symbols.insert("off_vr_sys_exit_tp".to_string(), None);
+        for out in [render(&symbols), render(&conf_fixture().0)] {
+            assert!(
+                !out.contains("vr_sys_exit_tp"),
+                "absent symbol must not add an offset key:\n{out}"
+            );
         }
     }
 

@@ -64,6 +64,18 @@ pub fn parse(text: &str) -> IomemInfo {
                 break;
             }
         }
+        /* The carveout walk only fires when the dump labels the hole. Some
+         * kernels (6.6 vivo, PD2463/iQOO Neo10 Pro+) report neither RAM nor
+         * `reserved` for it, so `current` keeps the first System RAM's start —
+         * 0x81960000 there, against a real DRAM base of 0x80000000. The whole
+         * direct map would then be aliased 0x1960000 too high and every write
+         * targets the wrong physical page. DRAM starts on a 1 GiB boundary, an
+         * invariant the runtime already relies on ("the base is rounded down to
+         * a gib", ops.cpp), so round the unexplained remainder off. Both
+         * measured shapes are unchanged: a carveout resolves to an aligned
+         * address, and a dump whose first System RAM is already aligned keeps
+         * it. */
+        current &= !(GIB_1 - 1);
         base = Some(current);
     }
 
@@ -140,5 +152,24 @@ a2a80000-d4cfffff : System RAM
         let info = parse(text);
         assert_eq!(info.dram_base, Some(0x4000_0000));
         assert_eq!(info.kernel_code_start, Some(0x4009_0000));
+    }
+
+    #[test]
+    fn dram_base_rounds_down_when_the_dump_has_no_carveout_to_walk() {
+        // PD2463 (iQOO Neo10 Pro+, 6.6.89): the kernel reports nothing at all
+        // for 0x80000000-0x8195ffff, so the carveout walk finds no `reserved`
+        // line and used to leave the base at the first System RAM's start.
+        // Aliasing the direct map through 0x81960000 put W1 0x1960000 too high
+        // and panicked the kernel.
+        let text = "\
+00100000-002f41ff : 100000.clock-controller clock-controller@100000
+81960000-819fffff : System RAM
+81a40000-81bfffff : System RAM
+82800000-849fffff : System RAM
+880000000-8801fffff : reserved
+8c0000000-bffffefff : System RAM
+";
+        let info = parse(text);
+        assert_eq!(info.dram_base, Some(0x8000_0000));
     }
 }
