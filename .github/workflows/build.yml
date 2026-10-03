@@ -44,7 +44,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/extract
+            build/extract-cli
           key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
+          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
+          # including the `-Z build-std` std/panic_abort artifacts.
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
       - name: Test extractor
         working-directory: tools/extract_rs
@@ -61,13 +66,15 @@ jobs:
         with:
           path: ${{ runner.temp }}/ondk
           key: ondk-${{ env.ONDK_VERSION }}-linux
+          restore-keys: |
+            ondk-${{ env.ONDK_VERSION }}-
 
       - name: Download ONDK
         if: steps.ondk-cache.outputs.cache-hit != 'true'
         run: |
           url="https://github.com/topjohnwu/ondk/releases/download/${ONDK_VERSION}/ondk-${ONDK_VERSION}-linux.tar.xz"
           mkdir -p "${{ runner.temp }}/ondk"
-          curl -fL "$url" -o "${{ runner.temp }}/ondk.tar.xz"
+          curl -fL --retry 3 --retry-delay 2 "$url" -o "${{ runner.temp }}/ondk.tar.xz"
           tar -C "${{ runner.temp }}/ondk" --strip-components=1 -xf "${{ runner.temp }}/ondk.tar.xz"
 
       - name: Link ONDK Rust toolchain
@@ -111,9 +118,15 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
           export RUSTC_BOOTSTRAP=1
           export RUSTFLAGS="-C force-unwind-tables=no -C link-arg=-Wl,--icf=all"
-          cargo +ondk build --release --target aarch64-linux-android --features http --manifest-path tools/extract_rs/Cargo.toml --target-dir build/extract \
+          # `--features http` is CLI-only: the APK's libextract.so is built
+          # without it on purpose (Kotlin resolves remote URLs), and
+          # `:app:prepareGhostlockExtractJniLibs` has already built that variant
+          # into build/extract. Sharing one target dir would make the two
+          # feature sets invalidate each other and rebuild the crate (plus the
+          # `-Z build-std` std artifacts) twice per run.
+          cargo +ondk build --release --target aarch64-linux-android --features http --manifest-path tools/extract_rs/Cargo.toml --target-dir build/extract-cli \
             -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size
-          cp build/extract/aarch64-linux-android/release/ghostlock-extract tools/extract_rs/ghostlock-extract-android-arm64
+          cp build/extract-cli/aarch64-linux-android/release/ghostlock-extract tools/extract_rs/ghostlock-extract-android-arm64
 
       - name: Export kernel profiles (GLK1)
         run: ./gradlew exportKernelProfiles --no-daemon
@@ -179,6 +192,10 @@ jobs:
             ~/.cargo/git
             build/extract
           key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
+          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
+          # including the `-Z build-std` std/panic_abort artifacts.
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
       - name: Build macOS universal binary
         working-directory: tools/extract_rs
@@ -215,6 +232,10 @@ jobs:
             ~/.cargo/git
             build/extract
           key: cargo-${{ runner.os }}-${{ hashFiles('tools/extract_rs/Cargo.lock') }}
+          # Without a restore-key any Cargo.lock touch is a full cold rebuild,
+          # including the `-Z build-std` std/panic_abort artifacts.
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
       - name: Build Windows binary
         shell: bash
