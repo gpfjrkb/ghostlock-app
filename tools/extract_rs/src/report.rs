@@ -529,6 +529,7 @@ mod tests {
             render_conf(&ConfInputs {
                 release: "6.1.145-android14-11-maybe-dirty",
                 phys: None,
+                phys_offset: None,
                 symbols: &symbols,
                 structs: &structs,
                 route: Some("select_stack"),
@@ -821,9 +822,11 @@ mod tests {
             extra_offsets: &no_extra_offsets(),
         });
         // Without this image's static derivation the unverified candidate must
-        // not borrow the hardware-probed frame/copy-window constants.
-        assert!(!out.contains("waiter_off"));
-        assert!(!out.contains("buffer_size"));
+        // not borrow the hardware-probed frame/copy-window constants. The route
+        // block still carries every field of its branch, so they only ever come
+        // out as an explicit `null`.
+        assert!(out.contains("waiter_off = null"));
+        assert!(out.contains("buffer_size = null"));
         assert!(out.contains("task_offset = 48"));
         assert!(out.contains("lock_offset = 56"));
         assert!(out.contains("compact_waiter = 1"));
