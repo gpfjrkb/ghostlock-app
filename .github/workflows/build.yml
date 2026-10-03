@@ -44,11 +44,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             build/extract
-            # build/extract-cli is built by the build-extractor-cli job since the
-            # split. It stays listed here purely to keep the cache version —
-            # which actions/cache derives from the path list, not the key —
-            # unchanged, so the existing ~650 MB entry stays usable.
             build/extract-cli
+          # NB: no comment lines inside `path:` above — it is a block scalar, so
+          # a `#` there is a literal path entry, and actions/cache derives its
+          # cache version from the path list. An added comment silently makes
+          # every existing entry invisible (one full cold rebuild).
+          # `build/extract-cli` is built by the build-extractor-cli job since the
+          # split; it stays listed only to keep that version stable.
           # The key has to cover the crate's own sources, not just Cargo.lock:
           # actions/cache only writes an entry whose key does not exist yet, so a
           # lock-only key freezes the target dir at the first save and every
