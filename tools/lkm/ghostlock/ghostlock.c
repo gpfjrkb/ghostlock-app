@@ -125,7 +125,12 @@ module_param(resident, int, 0400);
 MODULE_PARM_DESC(resident, "Expose /dev/glk and stay resident until UNLOAD");
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *);
-typedef void *(*umh_setup_t)(const char *, char **, char **, gfp_t,
+/* The return type is part of the KCFI type id: the kernel declares
+ * call_usermodehelper_setup() as returning struct subprocess_info *, so a
+ * local typedef with void * hashes differently and trips the KCFI check at
+ * the indirect call site (brk #0x8235 -> BUG -> panic on load). Keep this
+ * prototype byte-for-byte identical to include/linux/umh.h. */
+typedef struct subprocess_info *(*umh_setup_t)(const char *, char **, char **, gfp_t,
                              int (*)(struct subprocess_info *, struct cred *),
                              void (*)(struct subprocess_info *), void *);
 typedef int (*umh_exec_t)(struct subprocess_info *, int);
