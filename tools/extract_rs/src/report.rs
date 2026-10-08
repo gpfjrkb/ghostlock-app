@@ -1716,12 +1716,16 @@ mod tests {
                 ),
                 /* Fields the bundled reference profile does not carry yet:
                  * `available.*` is profile-only (the App turns it into UI choices
-                 * and the wire receives `backend.<id>.steps`), and the generated
-                 * profile always declares the second backend's block. */
+                 * and the wire receives `backend.<id>.steps`), the generated
+                 * profile always declares the second backend's block, and
+                 * `steps` is the post-refactor spelling of the deleted
+                 * `selection` owner - the pre-refactor bundle carries it under
+                 * no backend at all, the selected one included. */
                 None => assert!(
                     REFACTOR_ONLY.contains(&key.as_str())
                         || key.starts_with("available.")
-                        || key.starts_with("backend.cve_2026_43284."),
+                        || key.starts_with("backend.cve_2026_43284.")
+                        || key.ends_with(".steps"),
                     "generated profile has unexpected field {key}"
                 ),
             }
